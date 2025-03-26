@@ -1,0 +1,81 @@
+import librosa
+import moviepy.editor as mp
+import torch
+from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import json
+
+# Load video and extract audio
+video_path = '/content/4_S04E13_032_u.mp4'
+audio_path = 'extracted_audio.wav'
+
+video = mp.VideoFileClip(video_path)
+video.audio.write_audiofile(audio_path)
+
+# Load Wav2Vec 2.0 Model and Processor
+model_name = 'facebook/wav2vec2-base-960h'
+processor = Wav2Vec2Processor.from_pretrained(model_name)
+model = Wav2Vec2ForCTC.from_pretrained(model_name)
+
+# Load audio
+audio, sr = librosa.load(audio_path, sr=16000)
+
+# Extract features using Wav2Vec2.0
+input_values = processor(audio, return_tensors='pt', sampling_rate=16000).input_values
+with torch.no_grad():
+    logits = model(input_values).logits
+
+# Get predicted IDs and transcribe
+predicted_ids = torch.argmax(logits, dim=-1)
+transcription = processor.batch_decode(predicted_ids)[0]
+
+# Manually input the correct transcription
+manual_transcription = input('Please enter the exact transcription: ')
+
+words = manual_transcription.split()
+
+# Get timestamps
+timestamps = librosa.frames_to_time(np.arange(len(audio)), sr=sr)
+
+# Calculate Pitch
+pitch, mag = librosa.piptrack(y=audio, sr=sr)
+pitch_values = [p[np.argmax(m)] if np.any(m) else 0 for p, m in zip(pitch.T, mag.T)]
+
+# Adjust lengths if mismatched
+min_length = min(len(timestamps), len(pitch_values))
+pitch_values = pitch_values[:min_length]
+timestamps = timestamps[:min_length]
+
+# Calculate Energy (RMS)
+energy = librosa.feature.rms(y=audio)[0]
+energy = np.resize(energy, min_length)
+
+# Stress approximation (using energy peaks)
+stress_points = np.argwhere(energy > np.percentile(energy, 75)).flatten()
+
+# Divide timestamps evenly across words
+word_intervals = np.linspace(0, min_length, num=len(words)+1, dtype=int)
+
+# Save features with timestamps
+features = []
+for i, word in enumerate(words):
+    start_idx = word_intervals[i]
+    end_idx = word_intervals[i + 1]
+
+    features.append({
+        'word': word,
+        'start_timestamp': float(timestamps[start_idx]),
+        'end_timestamp': float(timestamps[end_idx - 1]),
+        'pitch': float(np.mean(pitch_values[start_idx:end_idx])),
+        'energy': float(np.mean(energy[start_idx:end_idx])),
+        'stress': int(any(idx in stress_points for idx in range(start_idx, end_idx)))
+    })
+
+# Save as JSON
+with open('aural_features.json', 'w') as f:
+    json.dump(features, f, indent=4)
+
+print('Exact Transcription:', manual_transcription)
+print('Aural features saved to aural_features.json')
